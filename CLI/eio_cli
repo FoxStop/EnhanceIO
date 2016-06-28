@@ -25,6 +25,7 @@ import sys,struct
 import subprocess
 import os
 import re
+import time
 
 #TBD : Change ioctl numbers to comply with linux kernel convention
 EIODEV = '/dev/eiodev'
@@ -52,8 +53,8 @@ udev_template = """
 ACTION!="add|change", GOTO="EIO_EOF"
 SUBSYSTEM!="block", GOTO="EIO_EOF"
 
-<cache_match_expr>, GOTO="EIO_CACHE"
-<source_match_expr>, GOTO="EIO_SOURCE"
+<cache_match_expr>, ENV{SYSTEMD_WANTS}="dev-$kernel.device", GOTO="EIO_CACHE"
+<source_match_expr>, ENV{SYSTEMD_WANTS}="dev-$kernel.device", GOTO="EIO_SOURCE"
 
 # If none of the rules above matched then it isn't an \
 EnhanceIO device so ignore it.
@@ -69,8 +70,8 @@ TEST!="/dev/enhanceio/<cache_name>", \
 PROGRAM="/bin/mkdir -p /dev/enhanceio/<cache_name>"
 PROGRAM="/bin/sh -c 'echo $kernel > /dev/enhanceio/<cache_name>/.ssd_name'"
 TEST=="/proc/enhanceio/<cache_name>", \
-RUN+="/sbin/eio_cli notify -a add -s /dev/$kernel -c <cache_name>", \
-GOTO="EIO_EOF"
+RUN+="/sbin/eio_cli notify -a add -s /dev/$kernel -c <cache_name>",GOTO="EIO_EOF"
+
 
 TEST=="/dev/enhanceio/<cache_name>/.disk_name", GOTO="EIO_SETUP"
 
@@ -93,15 +94,15 @@ PROGRAM="/bin/sh -c 'echo $major $minor > \
 PROGRAM="/bin/sh -c 'echo $links > \
 /dev/enhanceio/<cache_name>/.srclinks'"
 
+
+
 TEST=="/proc/enhanceio/<cache_name>",\
 PROGRAM="/bin/grep 'state\s*failed' /proc/enhanceio/<cache_name>/config", \
 PROGRAM="/bin/grep 'no_source_dev\s*1' /proc/enhanceio/<cache_name>/errors", \
-RUN+="/sbin/eio_cli notify -a add -d /dev/$kernel -c <cache_name>", NAME="", \
-GOTO="EIO_EOF"
-
-TEST!="/proc/enhanceio/<cache_name>", \
+RUN+="/sbin/eio_cli notify -a add -d /dev/$kernel -c <cache_name>",GOTO="EIO_EOF"
+#TEST!="/proc/enhanceio/<cache_name>", \
 TEST!="/dev/enhanceio/<cache_name>/.eio_delete", ACTION!="change", NAME=""
-	
+
 TEST=="/dev/enhanceio/<cache_name>/.ssd_name", GOTO="EIO_SETUP"
 
 GOTO="EIO_EOF"
@@ -124,28 +125,62 @@ ENV{ssd_name}="%c"
 PROGRAM="/bin/sh -c 'cat /dev/enhanceio/<cache_name>/.disk_name'", \
 ENV{disk_name}="%c"
 
-TEST!="/proc/enhanceio/<cache_name>", \
+#TEST!="/proc/enhanceio/<cache_name>", \
 TEST!="/dev/enhanceio/<cache_name>/.skip_enable", \
 RUN+="/bin/sh -c '/bin/mknod /dev/$env{disk_name} b \
 `/bin/cat /dev/enhanceio/<cache_name>/.disk_mjr_mnr`'"
 
-TEST!="/proc/enhanceio/<cache_name>", \
+#TEST!="/proc/enhanceio/<cache_name>", \
 RUN+="/bin/sh -c ' for i in `cat /dev/enhanceio/<cache_name>/.srclinks`; \
-do rm -f /dev/$$i; ln -f -s /dev/$env{disk_name} /dev/$$i; done'"
-
-
-TEST!="/proc/enhanceio/<cache_name>", RUN+="/sbin/eio_cli \
-enable -d /dev/$env{disk_name} -s /dev/$env{ssd_name} -m <mode> \
--b <block_size> -p <policy> -c <cache_name>"
-
+do rm -f /dev/$$i; ln -f -s ../../$env{disk_name} /dev/$$i; done'"
+TEST!="/proc/enhanceio/<cache_name>", \
+RUN+="/sbin/eio_cli enable -d /dev/$env{disk_name} -s /dev/$env{ssd_name} -m <mode> -b <block_size> -p <policy> -c <cache_name>"
 LABEL="EIO_EOF"
+"""
+
+systemd_template = """[Unit]
+Description=Initialization of enhanceio for <cache_name>
+DefaultDependencies=false
+Wants=systemd-udevd.service
+#Wants=systemd-hwdb-update.service
+#Wants=systemd-udev-triger.service
+Before=systemd-fsck-root.service
+Before=swap.service
+Before=swap.target
+#Before=local-fs.target
+Before=local-fs-pre.target
+Before=mdadm-raid.service
+#After=systemd-udevd-kernel.socket systemd-udevd-control.socket systemd-hwdb-update.service
+After=systemd-udevd-kernel.socket systemd-udevd-control.socket
+After=systemd-udevd.service
+#After=systemd-udev-trigger.service
+RequiresMountsFor=/proc
+
+
+
+
+[Install]
+WantedBy=swap.service
+WantedBy=swap.target
+WantedBy=systemd-fsck-root.service
+
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30s
+ExecStartPre=/bin/sh -c 'eio_pid=`/bin/pidof -xs /bin/udevadm`;if [ -z $eio_pid ];\
+ then /bin/udevadm trigger --type=subsystems --action=add --subsystem-match=block --subsystem-match=scsi-generic; fi'
+ExecStartPre=/bin/sh -c 'eio_pid=`/bin/pidof -xs /bin/udevadm`;if [ -z $eio_pid ];\
+ then /bin/udevadm trigger --type=devices --action=add --subsystem-match=block --subsystem-match=scsi-generic; fi'
+ExecStart=/bin/sh -c 'eio_ok=0; while [ $eio_ok = 0 ]; do if [ -z "`/bin/grep "state\s*normal" /proc/enhanceio/<cache_name>/config`" ];then sleep 1;else eio_ok=1;fi;done'
 """
 
 def make_udev_match_expr(dev_path, cache_name):
 	dict_udev = {}
 	status = run_cmd("udevadm info --query=property --name=" + dev_path)
 	for line in status.output.split('\n'):
-		if line is not '':
+		if line is not '' and 'calling:' not in line:
 			temp = line.split("=", 1)
 			dict_udev[temp[0].strip()] = temp[1].strip()
 
@@ -379,6 +414,10 @@ class Cache_rec(Structure):
 		self.print_info()	
 		if self.do_eio_ioctl(EIO_IOC_CREATE) == SUCCESS:
 			self.create_rules()
+			self.create_service()
+			cmd = "systemctl enable enhanceio-" + self.name + ".service"
+			status = run_cmd(cmd)
+			print "Systemd resp.: " + status.output
 			print 'Cache created successfully'
 			return SUCCESS
 		else: 	
@@ -399,6 +438,7 @@ class Cache_rec(Structure):
 			
 			if self.do_eio_ioctl(EIO_IOC_EDIT) == SUCCESS:
 				self.create_rules()
+				self.create_service()
 				print 'Cache edited Successfully'
 				return SUCCESS
 			else:
@@ -411,7 +451,7 @@ class Cache_rec(Structure):
 
 
 	def create_rules(self):
-		
+
 		source_match_expr = make_udev_match_expr(self.src_name, self.name)
 		print source_match_expr
 		cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
@@ -438,7 +478,26 @@ class Cache_rec(Structure):
 		except Exception as e:
 			print "Creation of udev rules file failed\n" 
 			print e
- 			return FAILURE
+			return FAILURE
+
+	def create_service(self):
+		source_match_expr = make_udev_match_expr(self.src_name, self.name)
+		cache_match_expr = make_udev_match_expr(self.ssd_name, self.name)
+		try: 	
+			systemd_service = systemd_template.replace("<cache_name>",\
+				    self.name).replace("<source_match_expr>",\
+				    source_match_expr).replace("<cache_match_expr>",\
+				    cache_match_expr)
+			# write rule file
+			systemd_file_path = "/etc/systemd/system/enhanceio-" + \
+					self.name + ".service" 
+			systemd_file = open(systemd_file_path, "w")
+			systemd_file.write(systemd_service)
+			return SUCCESS
+		except Exception as e:
+			print "Creation of systemd service file failed\n" 
+			print e
+			return FAILURE
 
 	def delete(self):
 
@@ -450,7 +509,8 @@ class Cache_rec(Structure):
 
 		if self.do_eio_ioctl(EIO_IOC_DELETE) == SUCCESS:
 			if self.delete_rules() == SUCCESS:
-				return SUCCESS
+				if self.delete_service() == SUCCESS:
+					return SUCCESS
 		else: 	
 			print 'Cache deletion failed (dmesg can provide you more info)'
 		
@@ -462,6 +522,8 @@ class Cache_rec(Structure):
 	def delete_rules(self):
 				
 		rule_file_path = "/etc/udev/rules.d/94-enhanceio-" + self.name + ".rules" 
+		systemd_file_path = "/etc/systemd/systemd/enhanceio-" + \
+		self.name + ".service" 
 		print "Removing file" + rule_file_path
 		try:	
 			os.remove(rule_file_path)
@@ -469,6 +531,22 @@ class Cache_rec(Structure):
 			return SUCCESS
 		except Exception as e:
 			print "Unable to delete rule file" + \
+			"(please remove it manually)"
+			print e
+		return FAILURE
+	def delete_service(self):
+		cmd = "systemctl disable enhanceio-" + self.name + ".service"
+		status = run_cmd(cmd)
+		print "Systemd resp.: " + status.output
+		systemd_file_path = "/etc/systemd/system/enhanceio-" + \
+		self.name + ".service" 
+		print "Removing file" + systemd_file_path
+		try:	
+			os.remove(systemd_file_path)
+			print "Done removing systemd file"
+			return SUCCESS
+		except Exception as e:
+			print "Unable to delete systemd file" + \
 			"(please remove it manually)"
 			print e
 		return FAILURE
@@ -590,6 +668,19 @@ def main():
 	mainparser = create_parser()
 	args = mainparser.parse_args()
 
+	if hasattr(args, 'cache'):
+		runfile = "/run/eio_cli." + args.cache
+	else:
+		runfile = "/run/eio_cli.null"
+	waittime = 0.0
+	while waittime <= 10.0 and (os.path.isfile(runfile) or os.path.isfile("/run/eio_cli.null")):
+		time.sleep (0.025)
+		waittime=waittime+0.025
+	if waittime < 10.0:
+		open(runfile, 'a').close()
+	else:
+		print "Another eio_cli process running. Remove file" + runfile
+
 	run_cmd("/sbin/modprobe enhanceio")
 	run_cmd("/sbin/modprobe enhanceio_fifo")
 	run_cmd("/sbin/modprobe enhanceio_lru")
@@ -605,6 +696,7 @@ def main():
 		cache = Cache_rec(name = args.cache, src_name = args.hdd,\
 				ssd_name = args.ssd, policy = args.policy,\
 				mode = args.mode, blksize = args.blksize)
+		os.remove(runfile)
 		return cache.create()
 
 	elif sys.argv[1] == "info":
@@ -619,18 +711,22 @@ def main():
 
 			print "\nFor more information look at " + \
 			      "/proc/enhanceio/<cache_name>/config"
+		os.remove(runfile)
 		return SUCCESS
 
 	elif sys.argv[1] == "edit":
 		cache = Cache_rec(name = args.cache, policy = args.policy, mode = args.mode)
+		os.remove(runfile)
 		return cache.edit()
 
 	elif sys.argv[1] == "delete":
 		cache = Cache_rec(name = args.cache)
+		os.remove(runfile)
 		return cache.delete()
 
 	elif sys.argv[1] == "clean":
 		cache = Cache_rec(name = args.cache)
+		os.remove(runfile)
 		return cache.clean()
 
 	elif sys.argv[1] == "enable":
@@ -640,10 +736,12 @@ def main():
 				mode = args.mode, blksize = args.blksize, persistence = 1)
 
 		cache.do_eio_ioctl(EIO_IOC_ENABLE)
+		os.remove(runfile)
 
 	elif sys.argv[1] == "disable":
 		cache = Cache_rec(name = args.cache)
 		cache.do_eio_ioctl(EIO_IOC_DISABLE)
+		os.remove(runfile)
 
 	elif sys.argv[1] == "notify":
 		# This command will be fired by udev rule on SSD/Source addition
@@ -666,17 +764,19 @@ def main():
 			if args.ssd:
 				cache = Cache_rec(name = args.cache, ssd_name = args.ssd,\
 						persistence = 1)
-				cache.do_eio_ioctl(EIO_SSD_REMOVE)
+				cache.do_eio_ioctl(EIO_IOC_SSD_REMOVE)
 			elif args.hdd:
 				cache = Cache_rec(name = args.cache, hdd_name = args.hdd,\
 						persistence = 1)
-				cache.do_eio_ioctl(EIO_SRC_REMOVE)
+				cache.do_eio_ioctl(EIO_IOC_SRC_REMOVE)
 
+		os.remove(runfile)
 		pass
 
 	elif sys.argv[1] == "sanity":
 		# Performs a basic sanity check
 		sanity(args.hdd, args.ssd)
+		os.remove(runfile)
 		return SUCCESS
 
 if __name__ == '__main__':
