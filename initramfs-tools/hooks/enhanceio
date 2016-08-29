@@ -1,0 +1,31 @@
+#!/bin/sh
+
+set -e
+
+PREREQ=""
+
+prereqs () {
+	echo "${PREREQ}"
+}
+
+case "${1}" in
+	prereqs)
+		prereqs
+		exit 0
+		;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+manual_add_modules enhanceio_lru
+manual_add_modules ahci
+
+cp /sbin/eio_cli /tmp/eio_cli.py
+/usr/bin/pycompile -O /tmp/eio_cli.py
+rm /tmp/eio_cli.py
+mv /tmp/eio_cli.pyo /tmp/eio_cli
+chmod uga+xr /tmp/eio_cli
+copy_exec /tmp/eio_cli /sbin/
+copy_exec /lib/udev/hwdb.bin
+
+exit 0
