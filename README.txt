@@ -1,6 +1,15 @@
 			STEC EnhanceIO SSD Caching Software
-				25th December, 2012
-
+				31th Aug, 2016
+				
+0. THIS IS elmystico/EnhaceIO VERSION
+	Code is ment to be used with systemd/udev because plain udev scenario
+	is not tested. (but maybe it's good, who knows? :-) )
+	Some patches from others from github for kernel part included. This is 
+	tested up to kernel 4.7.
+	I'm looking for some help here! Please contact me on github if you want
+	to do something good with me or want something to be implemented by me
+	or have some constructive thoughts. 
+	THANKS!
 
 1. WHAT IS ENHANCEIO?
 
